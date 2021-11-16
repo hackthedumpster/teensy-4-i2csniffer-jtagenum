@@ -61,8 +61,8 @@
  byte       pins[] = {  A0 ,  A1 ,  A2 ,  A3 ,  A4 ,  A5 ,  A6 ,  A7  };
  String pinnames[] = { "A0", "A1", "A2", "A3", "A4", "A5", "A6", "A7" };
 #elif defined(CORE_TEENSY)  // Teensy v2
- byte       pins[] = { PINB2 , PINB3 , PINB6 , PINB4 , PINB1  };
- String pinnames[] = {    "B2",    "B3",    "B6",    "B4",    "B1" };
+ byte       pins[] = {  A0 ,  A1 ,  A2 ,  A3 ,  A4 ,  A5 ,  A6 ,  A7, A8, A9  };
+ String pinnames[] = { "A0", "A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9" };
 #elif defined(ENERGIA)     // TI Launchpad Tiva C
  byte       pins[] = {  PA_5,   PB_4,   PE_5,   PE_4,   PB_1  };
  String pinnames[] = { "PA_5", "PB_4", "PE_5", "PE_4", "PB_1" };
@@ -257,7 +257,7 @@ void loop()
       case 'b':
       Serial.println("Welcome to jtagenum. press h for help");
       setupjtagenum();
-      delay(100);
+      delay(200);
       while(1)
        jtagenum(); 
 
@@ -505,7 +505,7 @@ void setupjtagenum()
         CPU_PRESCALE(0x01);
 #endif
  //       Serial.begin(115200);
- // Serial.print("jtag setup");
+  Serial.println("jtag setup");
         byte *curr;
         for (int i = 0; i < 5; ++i) {
           curr = jtag_ptr_from_idx(i);
@@ -521,7 +521,7 @@ void setupjtagenum()
 //           break;
           }
         }
- // Serial.print("jtag setup end");
+    Serial.println("jtag setup end");
 }
 
 //-------------------------------------------------------------------------------
@@ -1811,6 +1811,6 @@ void jtagenum()
       Serial.println("unknown command");
 //      help();
     }
-    Serial.print("\n> ");
+    Serial.println("\n> ");
   }
 }
