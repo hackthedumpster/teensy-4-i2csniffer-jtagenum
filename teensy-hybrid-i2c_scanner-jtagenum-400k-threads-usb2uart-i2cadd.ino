@@ -35,7 +35,180 @@
     To generalize for any I2C slave device rather than just the MPU6050 IMU, comment out the
     "#define MPU6050_SPECIFIC line below. This will remove all MPU6050 specific code
 */
+#include <Arduino.h> // for ir receive
+#include <RCSwitch.h>
+#include <FreqCount.h>
+#include <SPI.h>
+#include "16ton-nRF24L01.h"
+#include "16ton-RF24.h"
+#include "PinDefinitionsAndMore.h"
+#include <Thermistor.h>
+#include <NTC_Thermistor.h>
+#include "InternalTemperature.h"
+#include <Adafruit_NeoPixel.h>
 
+extern "C" uint32_t set_arm_clock(uint32_t frequency); // required prototype
+
+#define LED_PIN 13
+
+const uint32_t OverclockSpeed = 960000000;
+const uint32_t OverclockTimeoutUsec = 7 * 1000000;
+const uint32_t OverclockMaxTemp = 70;
+const uint32_t OverclockMaxTempRise = 10;
+
+float maxMeasuredTemperature;
+bool temperatureExceeded = false;
+bool overclockTimerExpired = false;
+uint32_t originalClockSpeed;
+IntervalTimer overclockTimer;
+
+void startOverclocking_720MHz ()
+{
+  // this speed does not require cooling
+
+  originalClockSpeed = F_CPU;
+
+// convert clock cycles between samples from original speed to new speed
+
+  // round by adding half of original clock speed
+//  cpuClockCycles = cpuClockCycles * 720 + ((originalClockSpeed / 2) / 1000000);
+//  cpuClockCycles /= (originalClockSpeed / 1000000);
+
+  set_arm_clock (720000000);
+}
+
+void startOverclocking_816MHz()
+{
+  // this speed does not require cooling
+
+  originalClockSpeed = F_CPU;
+
+  // convert clock cycles between samples from original speed to new speed
+
+  // round by adding half of original clock speed
+//  cpuClockCycles = cpuClockCycles * 816 + ((originalClockSpeed / 2) / 1000000);
+//  cpuClockCycles /= (originalClockSpeed / 1000000);
+
+  set_arm_clock (816000000);
+}
+
+void startOverclocking_960MHz ()
+{
+  float temperature = InternalTemperature.readTemperatureC ();
+  float maxTemp = temperature + OverclockMaxTempRise;
+
+  maxMeasuredTemperature = 0.0;
+
+  if (maxTemp > OverclockMaxTemp)
+  {
+    maxTemp = OverclockMaxTemp;
+  }
+
+  originalClockSpeed = F_CPU;
+
+  overclockTimerExpired = false;
+  temperatureExceeded = false;
+
+  SerialUSB2.print("   Pre-temperature: ");
+  SerialUSB2.println(temperature);
+  delay (200);
+
+  // if within 2 degrees of the max temperature, don't go into overclocking
+  // (caused problems with interrupt going off while still transitioning the clock)
+  if (temperature > (OverclockMaxTemp - 2))
+  {
+    
+    SerialUSB2.println("Temperature too high to overclock, stopping!");      
+  }
+  else
+  {
+    overclockTimer.begin (overclockTimerInterrupt, OverclockTimeoutUsec);
+    InternalTemperature.attachHighTempInterruptCelsius (maxTemp, temperatureInterrupt);
+
+    set_arm_clock (OverclockSpeed);
+  }
+//SerialUSB2.print("F_CPU oc: "));
+//SerialUSB2.println(F_CPU));
+//SerialUSB2.print("F_BUS oc: "));
+//SerialUSB2.println(F_BUS_ACTUAL));
+}
+
+void stopOverclocking (bool fromISR)
+{
+  maxMeasuredTemperature = InternalTemperature.readTemperatureC ();
+
+  set_arm_clock (originalClockSpeed);
+
+  overclockTimer.end ();
+  InternalTemperature.detachHighTempInterrupt ();
+
+digitalWriteFast(LED_PIN, LOW);
+  // don't print from within an ISR
+  if (!fromISR)
+  {
+    Serial.print("   Max temperature: ");
+    Serial.println(maxMeasuredTemperature);
+
+    if (temperatureExceeded)
+    {
+      Serial.println("Temperature interrupt triggered");      
+    }
+    if (overclockTimerExpired)
+    {
+      Serial.println("Overclock timer interrupt triggered");      
+    }
+  }
+}
+
+void temperatureInterrupt ()
+{
+  stopOverclocking (true);
+  temperatureExceeded = true;
+}
+
+void overclockTimerInterrupt ()
+{
+  stopOverclocking (true);
+  overclockTimerExpired = true;
+}
+
+  enum strategyType {
+  STRATEGY_NORMAL,
+  STRATEGY_NORMAL_OVERCLOCK_720,
+  STRATEGY_NORMAL_RLE,
+  STRATEGY_NORMAL_RLE_OVERCLOCK_816,
+  STRATEGY_HIGH_SPEED,
+  STRATEGY_HIGH_SPEED_RLE,
+  STRATEGY_ASM_3_CLOCKS,
+  STRATEGY_ASM_5_6_CLOCKS,
+  STRATEGY_ASM_8_CLOCKS,
+} sniff = STRATEGY_NORMAL;
+
+#if Teensy_4_0
+
+int F_BUS = F_BUS_ACTUAL;
+
+#endif
+#define SENSOR_PIN             A4
+#define REFERENCE_RESISTANCE   10000
+#define NOMINAL_RESISTANCE     10000
+#define NOMINAL_TEMPERATURE    25
+#define B_VALUE                3455
+
+Thermistor* thermistor;
+
+#define MARK_EXCESS_MICROS    20 // recommended for the cheap VS1838 modules
+
+//#define RECORD_GAP_MICROS 12000 // Activate it for some LG air conditioner protocols
+//#define DEBUG // Activate this for lots of lovely debug output from the decoders.
+#define INFO // To see valuable informations from universal decoder for pulse width or pulse distance protocols
+
+#include <16tonIRremote.hpp>
+
+
+
+RCSwitch mySwitch = RCSwitch();
+RF24 radio(37,36);
 
 #define CPU_RESTART_ADDR (uint32_t *)0xE000ED0C
 #define CPU_RESTART_VAL 0x5FA0004
@@ -57,6 +230,9 @@
 #if   defined(TEENSY_40)    // Teensy v4 usable digital are: A0-A9; A0-A9 are always digital 14-23, for Arduino compatibility
  byte       pins[] = {  A0 ,  A1 ,  A2 ,  A3 ,  A4 ,  A5 ,  A6 ,  A7, A8, A9  };
  String pinnames[] = { "A0", "A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9" };
+#elif   defined(TEENSY_41)    // Teensy v4 usable digital are: A0-A9; A0-A9 are always digital 14-23, for Arduino compatibility
+ byte       pins[] = {  A0 ,  A1 ,  A2 ,  A3 ,  A4 ,  A5 ,  A6 ,  A7, A8, A9  };
+ String pinnames[] = { "A0", "A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9" };
 #elif   defined(KINETISK)   // Teensy v3 usable digital are: A0-A7. 13=LED
  byte       pins[] = {  A0 ,  A1 ,  A2 ,  A3 ,  A4 ,  A5 ,  A6 ,  A7  };
  String pinnames[] = { "A0", "A1", "A2", "A3", "A4", "A5", "A6", "A7" };
@@ -74,7 +250,7 @@
  String pinnames[] = { "D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8" };
 #else                      // DEFAULT
                            // Arduino Pro. usable digital 2-12,14-10. 13=LED 0,1=serial
- byte       pins[] = { 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
+ byte       pins[] = { 2, 3, 4, 5, 6, 7, 8, 9, 11, 12};
  String pinnames[] = { "DIG_2", "DIG_3", "DIG_4", "DIG_5" , "DIG_6",
                        "DIG_7", "DIG_8", "DIG_9", "DIG_10", "DIG_11"};
   #include <EEPROM.h>
@@ -222,26 +398,55 @@ volatile bool bIsStop = false;
 volatile uint8_t last_current;
 #pragma endregion ISR Support
 
+const uint64_t pipes[2] = { 0xe1f0f0f0f0LL, 0xe1f0f0f0f0LL };
+
+boolean stringComplete = false;  // whether the string is complete
+static int dataBufferIndex = 0;
+boolean stringOverflow = false;
+char charOverflow = 0;
+
+char SendPayload[31] = "";
+char RecvPayload[31] = "";
+char serialBuffer[31] = "";
+
+#define PIN 6
+#define NUMPIXELS 240
+
+Adafruit_NeoPixel strip = Adafruit_NeoPixel(NUMPIXELS, PIN, NEO_GRB + NEO_KHZ800);
+
 void setup()
 {
 //  pinMode(14, INPUT);
 //  buttonState = digitalRead(14);
   pinMode(13, OUTPUT);
-  pinMode(23, INPUT);
+//  pinMode(23, INPUT);
   digitalWrite(13, HIGH);
-  Serial1.begin(9600);
-  SerialUSB2.begin(9600);
+  pinMode(41, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(41), resetint, CHANGE);
+  Serial1.begin(115200);
+  SerialUSB2.begin(115200);
+//  SerialUSB1.begin(9600);
   Serial.begin(460800);
     while (!Serial) {
     ; // wait for serial port to connect. Needed for native USB port only
   }
-threads.addThread(serpass, 1);
+
+//threads.addThread(serpass, 1);
 delay(100);
     Serial.println("Hack The Dumpster");
     Serial.println("Type a for i2c sniffer");
     Serial.println("Type b for jtagenum"); 
-    Serial.println("Type c to scan i2c device addresses"); 
+    Serial.println("Type c to scan i2c device addresses");
+    Serial.println("Type d to scan/sniff 433mhz pin0");
+    Serial.println("Type e to send 433mhz data pin10");
+    Serial.println("Type f freq counter pin9");
+    Serial.println("Type g nrf uart tx/rx");
+    Serial.println("Type h decode IR/RF OOK pin2");
+    Serial.println("Type i to read ntc on pinA4");
+    Serial.println("Type j to control GRB KHZ800 neopixels pin6");
 }
+
+
 
 void loop()
 {
@@ -251,6 +456,7 @@ void loop()
       case 'a':
       i2cscansetup();
       delay(100);
+      startOverclocking_816MHz();
       i2cscan(); 
       break;
       
@@ -258,16 +464,333 @@ void loop()
       Serial.println("Welcome to jtagenum. press h for help");
       setupjtagenum();
       delay(200);
-      while(1)
+      while(1) {
        jtagenum(); 
-
+      }
+      break;
+      
       case 'c':
        scani2c(); 
+      break;
+      
+      case 'd':
+       Serial.println("Starting 433mhz decode, on pin 0");
+       mySwitch.enableReceive(0);
+       scan433(); 
+      break;
+      
+      case 'e':
+//       Serial.println("Starting 433mhz transmit, on pin 10");
+       Serial.println("Please type remote code in DEC");
+      pinMode(10, OUTPUT);
+       delay(150);
+       mySwitch.enableTransmit(10);
+       mySwitch.setProtocol(1);
+       mySwitch.setPulseLength(420);
+       mySwitch.setRepeatTransmit(2);
+       send433();
        
+       
+       case 'f':
+       Serial.println("freq count pin9 ");
+       FreqCount.begin(1000000);  //Time in microseconds
+       freqcount();
+       break;
+       
+       case 'g':
+       Serial.println("Starting NRF24 ");
+       delay(100);
+       radio.begin();
+       radio.setDataRate(RF24_2MBPS);
+       radio.setPALevel(RF24_PA_MIN);
+       radio.setChannel(70);
+       radio.enableDynamicPayloads();
+       radio.setRetries(15,15);
+       radio.setCRCLength(RF24_CRC_16);
+       radio.openWritingPipe(pipes[0]);
+       radio.openReadingPipe(1,pipes[1]);  
+       radio.startListening();
+       radio.printDetails();
+       radio.printPrettyDetails();
+       nrf24();
+       break;
+       
+      case 'h':
+      Serial.println(F("START " __FILE__ " from " __DATE__ "\r\nUsing library version " VERSION_IRREMOTE));
+      IrReceiver.begin(2, ENABLE_LED_FEEDBACK); // Start the receiver, enable feedback LED, take LED feedback pin from the internal boards definition
+      Serial.print(F("Ready to receive IR signals of protocols: "));
+      printActiveIRProtocols(&Serial);
+      Serial.print(F("at pin "));
+      Serial.println(2);
+      irdecode();
+      break;
+
+      case 'i':
+      thermistor = new NTC_Thermistor(
+      SENSOR_PIN,
+      REFERENCE_RESISTANCE,
+      NOMINAL_RESISTANCE,
+      NOMINAL_TEMPERATURE,
+      B_VALUE
+      );
+      tempntc();
+      break;
+
+      case 'j':
+      Serial.println("Starting NEO setup pin6...");
+      strip.begin();
+      strip.show();
+      strip.setBrightness(50);
+      Serial.println("Enter Neopixel num, red, green, blue comma seperated IE");
+      Serial.println("for neopixel num 16, red 15, green 25, blue 35, enter;");
+      Serial.println("16,15,25,35");
+      neoser();
+      break;
+      
     }
+  }
+}
+
+void tempntc() {
+  while (1) {
+  // Reads temperature
+  const double celsius = thermistor->readCelsius();
+  const double kelvin = thermistor->readKelvin();
+  const double fahrenheit = thermistor->readFahrenheit();
+
+  // Output of information
+
+  Serial.print("Temperature: ");
+  Serial.print(celsius);
+  Serial.print(" C, ");
+  Serial.print(kelvin);
+  Serial.print(" K, ");
+  Serial.print(fahrenheit);
+  Serial.println(" F");
+
+  delay(500); // optionally, only to delay the output of information in the example.
+  }
+}
+
+void irdecode()  {
+  while (1) {
+      if (IrReceiver.decode()) {  // Grab an IR code
+        // Check if the buffer overflowed
+        if (IrReceiver.decodedIRData.flags & IRDATA_FLAGS_WAS_OVERFLOW) {
+            Serial.println(F("Overflow detected"));
+            Serial.println(F("Try to increase the \"RAW_BUFFER_LENGTH\" value of " STR(RAW_BUFFER_LENGTH) " in " __FILE__));
+            // see also https://github.com/Arduino-IRremote/Arduino-IRremote#modifying-compile-options-with-sloeber-ide
+        } else {
+            Serial.println();                               // 2 blank lines between entries
+            Serial.println();
+            IrReceiver.printIRResultShort(&Serial);
+            Serial.println();
+            Serial.println(F("Raw result in internal ticks (50 us) - with leading gap"));
+            IrReceiver.printIRResultRawFormatted(&Serial, false); // Output the results in RAW format
+            Serial.println(F("Raw result in microseconds - with leading gap"));
+            IrReceiver.printIRResultRawFormatted(&Serial, true);  // Output the results in RAW format
+            Serial.println();                               // blank line between entries
+            Serial.print(F("Result as internal ticks (50 us) array - compensated with MARK_EXCESS_MICROS="));
+            Serial.println(MARK_EXCESS_MICROS);
+            IrReceiver.compensateAndPrintIRResultAsCArray(&Serial, false); // Output the results as uint8_t source code array of ticks
+            Serial.print(F("Result as microseconds array - compensated with MARK_EXCESS_MICROS="));
+            Serial.println(MARK_EXCESS_MICROS);
+            IrReceiver.compensateAndPrintIRResultAsCArray(&Serial, true); // Output the results as uint16_t source code array of micros
+            IrReceiver.printIRResultAsCVariables(&Serial);  // Output address and data as source code variables
+
+            IrReceiver.compensateAndPrintIRResultAsPronto(&Serial);
+
+            /*
+             * Example for using the compensateAndStorePronto() function.
+             * Creating this String requires 2210 bytes program memory and 10 bytes RAM for the String class.
+             * The String object itself requires additional 440 Bytes RAM from the heap.
+             * This values are for an Arduino UNO.
+             */
+//        Serial.println();                                     // blank line between entries
+//        String ProntoHEX = F("Pronto HEX contains: ");        // Assign string to ProtoHex string object
+//        if (int size = IrReceiver.compensateAndStorePronto(&ProntoHEX)) {   // Dump the content of the IReceiver Pronto HEX to the String object
+//            // Append compensateAndStorePronto() size information to the String object (requires 50 bytes heap)
+//            ProntoHEX += F("\r\nProntoHEX is ");              // Add codes size information to the String object
+//            ProntoHEX += size;
+//            ProntoHEX += F(" characters long and contains "); // Add codes count information to the String object
+//            ProntoHEX += size / 5;
+//            ProntoHEX += F(" codes");
+//            Serial.println(ProntoHEX.c_str());                // Print to the serial console the whole String object
+//            Serial.println();                                 // blank line between entries
+//        }
+        }
+        IrReceiver.resume();                            // Prepare for the next value
+    }  
+  }
+}
+
+void neoser(void) {
+    while (Serial.available() > 0) {
+    int neo = Serial.parseInt();
+    // look for the next valid integer in the incoming serial stream:
+    int red = Serial.parseInt();
+    // do it again:
+    int green = Serial.parseInt();
+    // do it again:
+    int blue = Serial.parseInt();
+
+        if (Serial.read() == '\n') {
+      // constrain the values to 0 - 255 and invert
+      // if you're using a common-cathode LED, just use "constrain(color, 0, 255);"
+      neo = constrain(neo, 0, 240);
+      red = constrain(red, 0, 255);
+      green = constrain(green, 0, 255);
+      blue = constrain(blue, 0, 255);
+
+      strip.setPixelColor(neo, red,green,blue);
+      strip.show();
+        }
       }
 }
 
+void nrf24() {
+//  Serial.println("nrf b4 loop");
+  while (1) {
+//  Serial.println("in nrf loop");
+  nRF_receive();
+  serial_receive();
+  serialstuff();
+  } 
+}
+
+void serialstuff() {
+  while (Serial.available() > 0 ) {
+      char incomingByte = Serial.read();
+      if (stringOverflow) {
+         serialBuffer[dataBufferIndex++] = charOverflow;  // Place saved overflow byte into buffer
+         serialBuffer[dataBufferIndex++] = incomingByte;  // saved next byte into next buffer
+         stringOverflow = false;                          // turn overflow flag off
+      } else if (dataBufferIndex > 31) {
+         stringComplete = true;        // Send this buffer out to radio
+         stringOverflow = true;        // trigger the overflow flag
+         charOverflow = incomingByte;  // Saved the overflow byte for next loop
+         dataBufferIndex = 0;          // reset the bufferindex
+         break; 
+      } 
+      else if(incomingByte=='\n'){
+          serialBuffer[dataBufferIndex] = 0; 
+          stringComplete = true;
+      } else {
+          serialBuffer[dataBufferIndex++] = incomingByte;
+          serialBuffer[dataBufferIndex] = 0; 
+      }          
+  } // end while()
+} // end serialEvent()
+
+void nRF_receive(void) {
+  int len = 0;
+  if ( radio.available() ) {
+      bool done = false;
+      while ( !done ) {
+        len = radio.getDynamicPayloadSize();
+        done = radio.read(&RecvPayload,len);
+        delay(5);
+      }
+      delay(100);
+
+    RecvPayload[len] = 0; // null terminate string
+
+    Serial.print("R: ");
+    Serial.print(RecvPayload);
+    Serial.println();
+    RecvPayload[0] = 0;  // Clear the buffers
+  }  
+} // end nRF_receive()
+
+void serial_receive(void){
+
+  if (stringComplete) { 
+
+        strcat(SendPayload,serialBuffer);      
+        // swap TX & Rx addr for writing
+        radio.openWritingPipe(pipes[1]);
+        radio.openReadingPipe(0,pipes[0]);  
+        radio.stopListening();
+        bool ok = radio.write(&SendPayload,strlen(SendPayload));
+        Serial.print("S: ");
+        Serial.println(SendPayload);
+        stringComplete = false;
+
+        // restore TX & Rx addr for reading       
+        radio.openWritingPipe(pipes[0]);
+        radio.openReadingPipe(1,pipes[1]); 
+        radio.startListening();  
+        SendPayload[0] = 0;
+        dataBufferIndex = 0;
+        delay(100);
+
+  } // endif
+} // end serial_receive()    
+
+void freqcount () {
+  while (1) {
+  if (FreqCount.available()) {
+    unsigned long count = FreqCount.read();
+    Serial.println(count);
+    
+  }
+ }
+}
+
+void send433setup() {
+  Serial.println("yup");
+
+  delay(500);
+  while (1) {
+  mySwitch.send(13909523, 24);
+  delay(1000);
+  Serial.println("1");
+//  mySwitch.send(110101000011111000010011);
+  delay(1000);
+  mySwitch.send(13909524, 24);
+  delay(1000);
+  Serial.println("2");
+//  mySwitch.send(110101000011111000010100);
+  delay(2000);
+  mySwitch.send(13909525, 24);
+  delay(1000);
+  Serial.println("3");
+//  mySwitch.send(110101000011111000010101);
+  delay(3000);
+  }
+  
+}
+
+void resetint(){
+  SCB_AIRCR = 0x5FA0004;
+}
+
+int pload433;
+void send433() {
+  int pload;
+  while(1)
+  if (Serial.available() > 0) {
+      pload433 = Serial.parseInt();
+      pload = pload433;
+      if (Serial.read() == '\n') {
+        mySwitch.send(pload, 24);
+        delay(200);
+        Serial.print("sent ");
+        Serial.println(pload);
+        delay(1000);
+      }
+  }
+
+}
+
+void scan433() {
+  while(1)
+  if (mySwitch.available()) {
+    output(mySwitch.getReceivedValue(), mySwitch.getReceivedBitlength(), mySwitch.getReceivedDelay(), mySwitch.getReceivedRawdata(),mySwitch.getReceivedProtocol());
+    mySwitch.resetAvailable();
+  }
+}
+  
 void scani2c() {
   Wire.begin();
   delay(5);
@@ -309,14 +832,26 @@ void scani2c() {
     Serial.println("Hack The Dumpster");
     Serial.println("Type a for i2c sniffer");
     Serial.println("Type b for jtagenum"); 
-    Serial.println("Type c to scan i2c device addresses"); 
+    Serial.println("Type c to scan i2c device addresses");
+    Serial.println("Type d to scan/sniff 433mhz pin0");
+    Serial.println("Type e to send 433mhz data pin10");
+    Serial.println("Type f freq counter pin9");
+    Serial.println("Type g nrf uart tx/rx");
+    Serial.println("Type h decode IR/RF OOK pin2");
+    Serial.println("Type i to read ntc on pinA4");
   } else {
     Serial.println(F("done\n"));
     Serial.println("");
     Serial.println("Hack The Dumpster");
     Serial.println("Type a for i2c sniffer");
     Serial.println("Type b for jtagenum"); 
-    Serial.println("Type c to scan i2c device addresses"); 
+    Serial.println("Type c to scan i2c device addresses");
+    Serial.println("Type d to scan/sniff 433mhz pin0");
+    Serial.println("Type e to send 433mhz data pin10");
+    Serial.println("Type f freq counter pin9");
+    Serial.println("Type g nrf uart tx/rx");
+    Serial.println("Type h decode IR/RF OOK pin2");
+    Serial.println("Type i to read ntc on pinA4");
   }
 //  CPU_RESTART;
 }
@@ -440,7 +975,7 @@ void i2cscansetup()
   pinMode(MONITOR_OUT3, OUTPUT);
   digitalWrite(MONITOR_OUT3, LOW);
 
-  Serial3begin(2000000);
+  Serial3begin(900000);
   Serial3println("HELLO");
   Serial3println(F("F HELLO"));
   Serial3println(123.456, 2);
@@ -457,7 +992,7 @@ void i2cscansetup()
 #if 1
   Timer1_initialize(0.5); // run every half micro second
 #else
-  Timer1.initialize(1); // run every half micro second
+  Timer1.initialize(0.5); // run every half micro second
 #endif
 
   Timer1.attachInterrupt(capture_data);
@@ -1023,8 +1558,8 @@ int GetDataBytes(uint8_t* data, uint16_t& readidx, uint8_t* databytes)
 void OutputFormattedSentence(int RW, uint8_t dev, uint8_t reg, uint8_t numbytes, uint8_t* bytearray, uint16_t startidx)
 {
   Serial3.print("%lu uhg");
-  Serial.printf("I2C(%x) %s %d bytes %s 0x%x... ",
-                dev, (RW == 0 ? "writing" : "reading"),  numbytes - startidx, (RW == 0 ? "to" : "from"), reg);
+  Serial.printf("I2C(%x) %s %d bytes %s I2C(%x) 0x%x ",
+                dev, (RW == 0 ? "writing" : "reading"),  numbytes - startidx, (RW == 0 ? "to" : "from"), dev, reg);
   for (size_t i = startidx; i < numbytes; i++)
   {
     Serial.printf("0x%x ", bytearray[i]);
